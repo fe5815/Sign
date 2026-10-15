@@ -76,11 +76,17 @@
 </div>
 
 <script>
-  /* ★ 아래 따옴표 안에 Apps Script 웹앱 주소(…/exec)를 붙여 넣으세요 ★ */
-  var API = 'https://script.google.com/macros/s/여기에_웹앱_주소/exec';
-
-  var GID = (new URLSearchParams(location.search).get('gid') || '').replace(/\D/g, '');
-  var NET_ERR = '서버에 연결하지 못했습니다. 인터넷 연결을 확인하고 다시 시도해 주세요.';
+  /*
+   * 이 파일은 고칠 필요가 없습니다.
+   * 어느 스프레드시트(웹앱)로 보낼지는 QR 주소의 s= 값, 어느 명부인지는 gid= 값으로 정해집니다.
+   * → 시트를 '사본 만들기'한 사람도 이 페이지를 그대로 같이 쓸 수 있습니다.
+   */
+  var Q = new URLSearchParams(location.search);
+  var SID = (Q.get('s') || '').replace(/[^A-Za-z0-9_-]/g, '');
+  var API = SID ? 'https://script.google.com/macros/s/' + SID + '/exec' : '';
+  var GID = (Q.get('gid') || '').replace(/\D/g, '');
+  var NET_ERR = '서버에 연결하지 못했습니다. 인터넷 연결을 확인하고 다시 시도해 주세요. (오류 A)';
+  var BAD_ERR = '서버 응답이 올바르지 않습니다. 담당자에게 알려 주세요. (오류 B)';
   var cur = null;       // 확인된 { dept, name }
   var dirty = false;    // 서명을 그렸는지
 
@@ -107,10 +113,14 @@
       url += '?' + new URLSearchParams(params).toString();
     }
     return fetch(url, opt)
-      .then(function (r) { return r.json(); })
-      .catch(function () { throw new Error(NET_ERR); })
+      .catch(function () { throw new Error(NET_ERR); })              // 연결 자체가 안 됨 (배포 권한·주소 문제 포함)
+      .then(function (r) {
+        return r.text().then(function (t) {
+          try { return JSON.parse(t); } catch (x) { throw new Error(BAD_ERR); }   // 응답은 왔는데 JSON이 아님
+        });
+      })
       .then(function (res) {
-        if (!res || !res.ok) throw new Error((res && res.error) || NET_ERR);
+        if (!res || !res.ok) throw new Error((res && res.error) || BAD_ERR);
         return res.data;
       });
   }
@@ -192,9 +202,10 @@
   $('again').onclick = function () { $('name').value = ''; cur = null; show(1); };
 
   /* ── 시작 ── */
-  if (API.indexOf('여기에_') >= 0) {
-    $('title').textContent = '설정이 필요합니다';
-    $('msg').textContent = 'index.html의 API 주소에 웹앱 주소(…/exec)를 넣어 주세요.';
+  if (!API) {
+    $('title').textContent = '서명 화면 준비 완료';
+    $('msg').style.color = '#555';
+    $('msg').textContent = '이 페이지는 정상입니다. 연수 명부의 QR을 찍어서 들어와 주세요.';
   } else {
     api({ action: 'info', gid: GID })
       .then(function (info) {
