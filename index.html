@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>연수 전자 서명</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, 'Malgun Gothic', sans-serif; margin: 0; background: #f3f4f6; color: #222; }
+  .wrap { max-width: 480px; margin: 0 auto; padding: 16px; }
+  .card { background: #fff; border-radius: 12px; padding: 20px 18px; box-shadow: 0 1px 4px rgba(0,0,0,.12); }
+  h1 { font-size: 19px; margin: 0 0 4px; line-height: 1.35; word-break: keep-all; }
+  .sub { color: #666; font-size: 13px; margin-bottom: 16px; }
+  label { display: block; font-weight: bold; font-size: 14px; margin: 14px 0 6px; }
+  select, input[type=text] { width: 100%; font-size: 17px; padding: 12px; border: 1px solid #bbb; border-radius: 8px; background: #fff; }
+  button { width: 100%; font-size: 17px; padding: 13px; border: 0; border-radius: 8px; margin-top: 16px; background: #1a73e8; color: #fff; font-weight: bold; }
+  button.ghost { background: #fff; color: #333; border: 1px solid #bbb; font-weight: normal; }
+  button:disabled { opacity: .5; }
+  .row { display: flex; gap: 10px; }
+  .row button { flex: 1; }
+  .row button.ghost { flex: 0 0 34%; }
+  #msg { min-height: 20px; margin-top: 12px; font-size: 14px; color: #c5221f; }
+  .who { font-size: 17px; margin-bottom: 10px; }
+  .who b { font-size: 20px; }
+  .pad { position: relative; border: 2px dashed #9aa0a6; border-radius: 8px; background: #fff; }
+  canvas { display: block; width: 100%; aspect-ratio: 5 / 2; touch-action: none; }
+  .hint { position: absolute; left: 0; right: 0; top: 50%; transform: translateY(-50%); text-align: center; color: #c4c7cc; font-size: 15px; pointer-events: none; }
+  .note { font-size: 13px; color: #b06000; margin-bottom: 8px; }
+  .done { text-align: center; padding: 18px 0 6px; }
+  .done .ok { font-size: 46px; color: #188038; line-height: 1; }
+  .done p { font-size: 18px; margin: 12px 0 0; }
+  .hide { display: none; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="card">
+    <h1 id="title">불러오는 중…</h1>
+    <div class="sub">전자 서명</div>
+
+    <!-- 1단계: 본인 확인 -->
+    <div id="step1" class="hide">
+      <label for="dept">부서</label>
+      <select id="dept"></select>
+      <label for="name">이름</label>
+      <input id="name" type="text" autocomplete="off" placeholder="이름을 입력하세요">
+      <button id="check" type="button">확인</button>
+    </div>
+
+    <!-- 2단계: 서명 -->
+    <div id="step2" class="hide">
+      <div class="who"><span id="whoDept"></span> <b id="whoName"></b></div>
+      <div id="resign" class="note hide">이미 서명하셨습니다. 다시 제출하면 새 서명으로 바뀝니다.</div>
+      <div class="pad">
+        <canvas id="cv" width="600" height="240"></canvas>
+        <div class="hint" id="hint">여기에 서명해 주세요</div>
+      </div>
+      <div class="row">
+        <button id="clear" type="button" class="ghost">지우기</button>
+        <button id="submit" type="button">서명 제출</button>
+      </div>
+      <button id="back" type="button" class="ghost">이름 다시 입력</button>
+    </div>
+
+    <!-- 3단계: 완료 -->
+    <div id="step3" class="hide">
+      <div class="done">
+        <div class="ok">✔</div>
+        <p><b id="doneName"></b> 님, 서명이 완료되었습니다.</p>
+      </div>
+      <button id="again" type="button" class="ghost">처음으로</button>
+    </div>
+
+    <div id="msg"></div>
+  </div>
+</div>
+
+<script>
+  /* ★ 아래 따옴표 안에 Apps Script 웹앱 주소(…/exec)를 붙여 넣으세요 ★ */
+  var API = 'https://script.google.com/macros/s/여기에_웹앱_주소/exec';
+
+  var GID = (new URLSearchParams(location.search).get('gid') || '').replace(/\D/g, '');
+  var NET_ERR = '서버에 연결하지 못했습니다. 인터넷 연결을 확인하고 다시 시도해 주세요.';
+  var cur = null;       // 확인된 { dept, name }
+  var dirty = false;    // 서명을 그렸는지
+
+  function $(id) { return document.getElementById(id); }
+  function nospace(s) { return String(s).replace(/\s+/g, ''); }
+  function show(n) {
+    ['step1', 'step2', 'step3'].forEach(function (id, i) { $(id).classList.toggle('hide', i + 1 !== n); });
+    $('msg').textContent = '';
+  }
+  function fail(err) { $('msg').textContent = (err && err.message) ? err.message.replace(/^Error:\s*/, '') : String(err); }
+
+  /**
+   * Apps Script 웹앱 호출.
+   * credentials: 'omit' → 구글 로그인 정보를 보내지 않으므로, 여러 계정에 로그인된 브라우저에서도 막히지 않습니다.
+   * 서명 저장(save)은 데이터가 커서 POST로, 나머지는 GET으로 보냅니다.
+   */
+  function api(params, post) {
+    var url = API, opt = { credentials: 'omit', redirect: 'follow' };
+    if (post) {
+      opt.method = 'POST';
+      opt.headers = { 'Content-Type': 'text/plain;charset=utf-8' };   // 이 형식이어야 추가 확인 요청 없이 바로 전송됨
+      opt.body = JSON.stringify(params);
+    } else {
+      url += '?' + new URLSearchParams(params).toString();
+    }
+    return fetch(url, opt)
+      .then(function (r) { return r.json(); })
+      .catch(function () { throw new Error(NET_ERR); })
+      .then(function (res) {
+        if (!res || !res.ok) throw new Error((res && res.error) || NET_ERR);
+        return res.data;
+      });
+  }
+
+  /* ── 서명판 ── */
+  var cv = $('cv'), ctx = cv.getContext('2d'), drawing = false;
+  ctx.lineWidth = 5; ctx.lineCap = 'round'; ctx.lineJoin = 'round'; ctx.strokeStyle = '#000';
+
+  function pos(e) {
+    var r = cv.getBoundingClientRect();
+    return { x: (e.clientX - r.left) * cv.width / r.width, y: (e.clientY - r.top) * cv.height / r.height };
+  }
+  cv.addEventListener('pointerdown', function (e) {
+    e.preventDefault();
+    drawing = true;
+    try { cv.setPointerCapture(e.pointerId); } catch (x) {}
+    var p = pos(e);
+    ctx.beginPath(); ctx.moveTo(p.x, p.y); ctx.lineTo(p.x + 0.1, p.y + 0.1); ctx.stroke();
+    dirty = true; $('hint').classList.add('hide');
+  });
+  cv.addEventListener('pointermove', function (e) {
+    if (!drawing) return;
+    e.preventDefault();
+    var p = pos(e);
+    ctx.lineTo(p.x, p.y); ctx.stroke();
+  });
+  ['pointerup', 'pointercancel', 'pointerleave'].forEach(function (t) {
+    cv.addEventListener(t, function () { drawing = false; });
+  });
+  function clearPad() {
+    ctx.clearRect(0, 0, cv.width, cv.height);
+    dirty = false; $('hint').classList.remove('hide');
+  }
+  function exportPng() {
+    var off = document.createElement('canvas');
+    off.width = 300; off.height = 120;
+    off.getContext('2d').drawImage(cv, 0, 0, 300, 120);
+    return off.toDataURL('image/png');
+  }
+
+  /* ── 1단계 ── */
+  function doCheck() {
+    var dept = $('dept').value, name = $('name').value.trim();
+    if (!dept) { $('msg').textContent = '부서를 선택하세요.'; return; }
+    if (!name) { $('msg').textContent = '이름을 입력하세요.'; return; }
+    $('check').disabled = true; $('msg').textContent = '';
+    api({ action: 'check', gid: GID, dept: dept, name: name })
+      .then(function (res) {
+        $('check').disabled = false;
+        if (!res.ok) { $('msg').textContent = '명단과 일치하지 않습니다. 부서와 이름을 다시 확인해 주세요.'; return; }
+        cur = { dept: dept, name: name };
+        $('whoDept').textContent = nospace(res.dept);
+        $('whoName').textContent = nospace(res.name);
+        $('resign').classList.toggle('hide', !res.signed);
+        clearPad();
+        show(2);
+      })
+      .catch(function (err) { $('check').disabled = false; fail(err); });
+  }
+  $('check').onclick = doCheck;
+  $('name').addEventListener('keydown', function (e) { if (e.key === 'Enter') { e.preventDefault(); $('name').blur(); doCheck(); } });
+
+  /* ── 2단계 ── */
+  $('clear').onclick = clearPad;
+  $('back').onclick = function () { show(1); };
+  $('submit').onclick = function () {
+    if (!dirty) { $('msg').textContent = '서명을 해 주세요.'; return; }
+    $('submit').disabled = true; $('msg').style.color = '#555'; $('msg').textContent = '제출하는 중입니다…';
+    api({ action: 'save', gid: GID, dept: cur.dept, name: cur.name, sign: exportPng() }, true)
+      .then(function (res) {
+        $('submit').disabled = false; $('msg').style.color = '';
+        $('doneName').textContent = nospace(res.name);
+        show(3);
+      })
+      .catch(function (err) { $('submit').disabled = false; $('msg').style.color = ''; fail(err); });
+  };
+
+  /* ── 3단계 ── */
+  $('again').onclick = function () { $('name').value = ''; cur = null; show(1); };
+
+  /* ── 시작 ── */
+  if (API.indexOf('여기에_') >= 0) {
+    $('title').textContent = '설정이 필요합니다';
+    $('msg').textContent = 'index.html의 API 주소에 웹앱 주소(…/exec)를 넣어 주세요.';
+  } else {
+    api({ action: 'info', gid: GID })
+      .then(function (info) {
+        $('title').textContent = info.title;
+        document.title = info.title;
+        var sel = $('dept');
+        var first = document.createElement('option'); first.value = ''; first.textContent = '부서를 선택하세요';
+        sel.appendChild(first);
+        info.depts.forEach(function (d) {
+          var o = document.createElement('option'); o.value = d; o.textContent = nospace(d);
+          sel.appendChild(o);
+        });
+        show(1);
+      })
+      .catch(function (err) { $('title').textContent = '연수 명부를 열 수 없습니다'; fail(err); });
+  }
+</script>
+</body>
+</html>
